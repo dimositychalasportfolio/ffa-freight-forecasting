@@ -89,8 +89,8 @@ Full per-model results are in [`results/FFA_Model_Comparison.csv`](results/FFA_M
 
 ## Authors
 
-- Dimos Tychalas
 - [Ioannis Katsiris](https://www.linkedin.com/in/ioannis-katsiris-57b7581b6/)
+- [Dimos Tychalas](https://www.linkedin.com/in/dimos-tychalas-2757671aa/)
 
 This project was developed jointly.
 
