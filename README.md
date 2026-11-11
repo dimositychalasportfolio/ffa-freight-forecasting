@@ -5,7 +5,8 @@ information about the direction of Forward Freight Agreement (FFA) prices for Ca
 Panamax vessels at quarterly and four-month horizons.
 
 **Short answer:** a modest, plausible signal at the +4MON horizon (test balanced accuracy of about
-66-69% versus a 50% baseline). At the +1Q to +3Q horizons the evidence is weak or absent.
+65-72% versus a 50% baseline, with wide confidence intervals). At the +1Q to +3Q horizons the evidence
+is weak or absent.
 The project's main contribution is the evaluation design, not a trading strategy.
 
 ## Question
@@ -24,7 +25,8 @@ class from the file name and the contract from the `Route-Period` column.
 
 ## Method
 
-- **Features (7):** price level, 1/5/20-day returns, 5/20-day moving-average gap, 20-day volatility, RSI(14).
+- **Features (6):** 1/5/20-day returns, 5/20-day moving-average gap, 20-day volatility, RSI(14). All are
+  relative measures; the raw price level is excluded because it is non-stationary (see below).
 - **Target:** price higher after the horizon (1) or not (0).
 - **Split:** chronological 60% / 20% / 20% (train / validation / test), with a **purge gap equal to the
   forecast horizon** at each boundary so that no label reaches into the next period.
@@ -41,14 +43,14 @@ class from the file name and the contract from the `Route-Period` column.
 
 | Vessel | Horizon | Model | Validation bal. acc. | **Test bal. acc.** | Test 95% CI (block bootstrap) |
 |---|---|---|---|---|---|
-| Capesize | +1Q | Logistic Regression | 0.72 | 0.63 | 0.50 - 0.74 |
-| Capesize | +2Q | Logistic Regression | 0.63 | 0.58 | 0.50 - 0.63 |
-| Capesize | +3Q | Gradient Boosting | 0.67 | 0.48 | 0.33 - 0.61 |
-| Capesize | **+4MON** | Logistic Regression | 0.73 | **0.69** | 0.52 - 0.79 |
-| Panamax | +1Q | Gradient Boosting | 0.79 | 0.53 | 0.38 - 0.63 |
-| Panamax | +2Q | Logistic Regression | 0.90 | 0.37 | 0.24 - 0.51 |
-| Panamax | +3Q | Gradient Boosting | 0.78 | 0.51 | 0.49 - 0.52 |
-| Panamax | **+4MON** | Logistic Regression | 0.90 | **0.66** | 0.57 - 0.75 |
+| Capesize | +1Q | Logistic Regression | 0.61 | 0.66 | 0.53 - 0.75 |
+| Capesize | +2Q | Gradient Boosting | 0.56 | 0.47 | 0.35 - 0.59 |
+| Capesize | +3Q | Logistic Regression | 0.56 | 0.49 | 0.35 - 0.59 |
+| Capesize | **+4MON** | Logistic Regression | 0.64 | **0.72** | 0.57 - 0.83 |
+| Panamax | +1Q | Logistic Regression | 0.74 | 0.55 | 0.43 - 0.66 |
+| Panamax | +2Q | Majority baseline (no model beat it on validation) | 0.50 | 0.50 | - |
+| Panamax | +3Q | Extra Trees | 0.64 | 0.59 | 0.51 - 0.67 |
+| Panamax | **+4MON** | Logistic Regression | 0.78 | **0.65** | 0.49 - 0.75 |
 
 The intervals use a moving-block bootstrap with block length equal to the forecast horizon, because
 overlapping labels are strongly autocorrelated and an ordinary bootstrap would make them far too narrow.
@@ -59,14 +61,15 @@ Full per-model results are in [`results/FFA_Model_Comparison.csv`](results/FFA_M
 
 ### What the results say
 
-1. **The only consistent out-of-sample edge is at the 4-month horizon**, for both vessel classes and
-   for every non-baseline model (balanced accuracy 61-71%). For both deployment models the 95% interval
-   stays above 50%, but only just for Capesize (lower bound 0.52), so the edge is plausible, not proven.
-2. **At quarterly horizons the signal is unreliable.** Two of six deployment models score at or below
-   50% on the test set.
-3. **Validation scores are much higher than test scores** (e.g. Panamax +2Q: 0.90 vs 0.37). Validation
-   accuracy was therefore not a trustworthy guide to out-of-sample performance, which points to regime
-   change between the windows and overfitting to the validation period.
+1. **The only consistent out-of-sample edge is at the 4-month horizon.** Every non-baseline model scores
+   0.64-0.73 on the test set for both vessel classes. The Capesize interval stays above 50% (0.57-0.83);
+   the Panamax interval just touches it (0.49-0.75). The edge is plausible, not proven.
+2. **At quarterly horizons the signal is unreliable.** Most intervals include 50%, and for Panamax +2Q
+   no model beat the majority baseline on validation, so the baseline was deployed.
+3. **Removing the raw price level removed the validation overfitting.** With the price level as a feature,
+   validation balanced accuracy was on average 0.13 higher than test (e.g. Panamax +2Q: 0.90 vs 0.37).
+   Without it, validation and test are on average within 0.03 of each other, while average test accuracy
+   is unchanged (0.58 vs 0.59). The price level was letting models learn levels specific to one period.
 
 ## Limitations (read before citing any number)
 
@@ -76,15 +79,13 @@ Full per-model results are in [`results/FFA_Model_Comparison.csv`](results/FFA_M
   reported here as results.
 - **Small effective sample.** Overlapping 63/84-day labels are strongly autocorrelated, so the number of
   independent observations is far lower than the row count.
-- **The price level is used as a feature**, which is non-stationary and probably drives some of the
-  regime-dependence seen above.
 - Supramax was not available. Live forecasts in the generated report are marked STALE (data ends 2026-04-21)
   and should be ignored.
 
 ## Next steps
 
 - Replace the single split with walk-forward evaluation.
-- Drop the raw price level and test stationary features (spreads between tenors, curve slope).
+- Test term-structure features (spreads between tenors, curve slope).
 - Add Supramax and refresh the data.
 
 ## Authors

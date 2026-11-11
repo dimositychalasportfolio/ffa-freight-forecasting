@@ -44,6 +44,12 @@ PERIOD_EXPERIMENTS = {
 DESIRED_VESSELS = ("Cape", "Panamax", "Supramax")
 TRANSACTION_COST_POINTS = 50.0
 RANDOM_STATE = 42
+
+# Model inputs. All are relative (returns, ratios, volatility, RSI), so they keep
+# the same meaning across price regimes. The raw price level is deliberately
+# excluded: it is non-stationary, and a model can learn "above X it falls",
+# which only holds inside the training window.
+FEATURES = ["Return_1D", "Return_5D", "Return_20D", "MA_Gap", "Volatility_20D", "RSI_14"]
 MAX_LIVE_DATA_STALENESS_DAYS = 7
 
 
@@ -192,7 +198,7 @@ def make_feature_frame(price: pd.Series, trading_days: int) -> tuple[pd.DataFram
     frame["Future_Return"] = frame["Future_Price"] / frame["Price"] - 1
     frame["Target"] = (frame["Future_Return"] > 0).astype("float")
 
-    features = ["Price", "Return_1D", "Return_5D", "Return_20D", "MA_Gap", "Volatility_20D", "RSI_14"]
+    features = FEATURES
     live_frame = frame.dropna(subset=features).copy()
     model_frame = live_frame.dropna(subset=["Future_Price", "Future_Return"]).copy()
     model_frame["Target"] = model_frame["Target"].astype(int)
@@ -335,7 +341,7 @@ def run_experiment(
     price = read_contract_series(source, str(config["tenor"]))
     model_frame, live_frame = make_feature_frame(price, trading_days)
     train, validation, test = chronological_split(model_frame, trading_days)
-    features = ["Price", "Return_1D", "Return_5D", "Return_20D", "MA_Gap", "Volatility_20D", "RSI_14"]
+    features = FEATURES
 
     if train["Target"].nunique() < 2:
         raise ValueError("Training target has only one class.")
