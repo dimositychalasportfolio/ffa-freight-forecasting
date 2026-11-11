@@ -87,6 +87,13 @@ Full per-model results are in [`results/FFA_Model_Comparison.csv`](results/FFA_M
 - Drop the raw price level and test stationary features (spreads between tenors, curve slope).
 - Add Supramax and refresh the data.
 
+## Authors
+
+- Dimos Tychalas
+- [Ioannis Katsiris](https://www.linkedin.com/in/ioannis-katsiris-57b7581b6/)
+
+This project was developed jointly.
+
 ## Run
 
 ```bash
