@@ -3,3 +3,8 @@
 __pycache__/
 .venv/
 .DS_Store
+
+# Outputs written by `python main.py` (curated copies live in results/)
+/FFA_*.csv
+/FFA_*.png
+/FFA_Period_Report.txt
