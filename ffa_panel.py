@@ -272,18 +272,55 @@ def non_overlapping_backtest(
     return decisions
 
 
-def sharpe_ratio(pnl: pd.Series) -> float:
+def sharpe_ratio(pnl: pd.Series, trading_days: int) -> float:
+    """Annualised Sharpe ratio for one trade every `trading_days` trading days.
+
+    Trades are non-overlapping and spaced by the forecast horizon, so a year
+    holds about 252 / trading_days trades, not 252.
+    """
     std = pnl.std(ddof=1)
     if not np.isfinite(std) or std == 0:
         return float("nan")
-    return float(pnl.mean() / std * np.sqrt(252))
+    return float(pnl.mean() / std * np.sqrt(252 / trading_days))
+
+
+BOOTSTRAP_SAMPLES = 2_000
+
+
+def block_bootstrap_ci(
+    y_true: pd.Series, y_pred: np.ndarray, block_length: int, samples: int = BOOTSTRAP_SAMPLES, level: float = 0.95
+) -> tuple[float, float]:
+    """Moving-block bootstrap interval for balanced accuracy.
+
+    Labels look `block_length` days ahead, so neighbouring rows are strongly
+    autocorrelated. Resampling whole blocks keeps that dependence; an ordinary
+    row bootstrap would give intervals that are far too narrow.
+    """
+    truth = np.asarray(y_true)
+    prediction = np.asarray(y_pred)
+    n = len(truth)
+    block_length = max(1, min(block_length, n))
+    starts = np.arange(n - block_length + 1)
+    blocks_needed = int(np.ceil(n / block_length))
+    rng = np.random.default_rng(RANDOM_STATE)
+    scores = []
+    for _ in range(samples):
+        chosen = rng.choice(starts, size=blocks_needed, replace=True)
+        index = (chosen[:, None] + np.arange(block_length)).ravel()[:n]
+        if len(np.unique(truth[index])) < 2:
+            continue
+        scores.append(balanced_accuracy_score(truth[index], prediction[index]))
+    if not scores:
+        return float("nan"), float("nan")
+    tail = (1 - level) / 2 * 100
+    return float(np.percentile(scores, tail)), float(np.percentile(scores, 100 - tail))
 
 
 def choose_threshold(validation: pd.DataFrame, probabilities: np.ndarray, trading_days: int) -> tuple[float, float]:
     candidates = []
     for threshold in np.arange(0.50, 0.66, 0.025):
         backtest = non_overlapping_backtest(validation, probabilities, float(threshold), trading_days)
-        candidates.append((float(threshold), sharpe_ratio(backtest["Net_PnL"])))
+        candidates.append((float(threshold), sharpe_ratio(backtest["Net_PnL"], trading_days)))
 
     valid = [(threshold, score) for threshold, score in candidates if np.isfinite(score)]
     return max(valid, key=lambda item: item[1]) if valid else (0.55, float("nan"))
@@ -337,6 +374,7 @@ def run_experiment(
         final_model = clone(final_template).fit(development[features], development["Target"])
         final_models[name] = final_model
         test_prediction = final_model.predict(test[features])
+        ci_low, ci_high = block_bootstrap_ci(test["Target"], test_prediction, trading_days)
         validation_metrics = validation_scores.loc[validation_scores["Model"].eq(name)].iloc[0]
         model_comparison_rows.append(
             {
@@ -350,6 +388,8 @@ def run_experiment(
                 "Validation_Precision": float(validation_metrics["Validation_Precision"]),
                 "Test_Accuracy": accuracy_score(test["Target"], test_prediction),
                 "Test_Balanced_Accuracy": balanced_accuracy_score(test["Target"], test_prediction),
+                "Test_Balanced_Accuracy_CI95_Low": ci_low,
+                "Test_Balanced_Accuracy_CI95_High": ci_high,
                 "Test_Precision": precision_score(test["Target"], test_prediction, zero_division=0),
                 "Deployment_Model": name == deployment_model_name,
             }
@@ -405,6 +445,8 @@ def run_experiment(
         "Deployment_Validation_Accuracy": float(deployment_test["Validation_Accuracy"]),
         "Deployment_Test_Accuracy": float(deployment_test["Test_Accuracy"]),
         "Deployment_Test_Balanced_Accuracy": float(deployment_test["Test_Balanced_Accuracy"]),
+        "Deployment_Test_Balanced_Accuracy_CI95_Low": float(deployment_test["Test_Balanced_Accuracy_CI95_Low"]),
+        "Deployment_Test_Balanced_Accuracy_CI95_High": float(deployment_test["Test_Balanced_Accuracy_CI95_High"]),
         "Best_Test_Classifier": str(retrospective_winner["Model"]),
         "Best_Test_Accuracy": float(retrospective_winner["Test_Accuracy"]),
         "Threshold": threshold,
@@ -412,7 +454,7 @@ def run_experiment(
         "Test_MAE_Future_Return": mean_absolute_error(test["Future_Return"], test_return_prediction),
         "Test_Trade_Count": int((backtest["Signal"] != 0).sum()),
         "Test_Net_PnL_Points": float(backtest["Net_PnL"].sum()),
-        "Test_Sharpe": sharpe_ratio(backtest["Net_PnL"]),
+        "Test_Sharpe": sharpe_ratio(backtest["Net_PnL"], trading_days),
         "Last_Data_Date": latest.index[0].date().isoformat(),
     }
     live = {
@@ -560,11 +602,11 @@ Requested but absent source files: {', '.join(missing_vessels) or 'none'}
 
 Deployment-model summary
 ------------------------
-{format_table(summary_df, ['Vessel', 'Period', 'Contract', 'Deployment_Classifier', 'Deployment_Test_Accuracy', 'Deployment_Test_Balanced_Accuracy', 'Best_Test_Classifier', 'Best_Test_Accuracy', 'Test_Trade_Count', 'Test_Net_PnL_Points', 'Test_Sharpe'])}
+{format_table(summary_df, ['Vessel', 'Period', 'Contract', 'Deployment_Classifier', 'Deployment_Test_Accuracy', 'Deployment_Test_Balanced_Accuracy', 'Deployment_Test_Balanced_Accuracy_CI95_Low', 'Deployment_Test_Balanced_Accuracy_CI95_High', 'Best_Test_Classifier', 'Best_Test_Accuracy', 'Test_Trade_Count', 'Test_Net_PnL_Points', 'Test_Sharpe'])}
 
 Complete model comparison
 -------------------------
-{format_table(model_comparison_df, ['Vessel', 'Period', 'Model', 'Validation_Accuracy', 'Validation_Balanced_Accuracy', 'Test_Accuracy', 'Test_Balanced_Accuracy', 'Test_Precision', 'Deployment_Model'])}
+{format_table(model_comparison_df, ['Vessel', 'Period', 'Model', 'Validation_Accuracy', 'Validation_Balanced_Accuracy', 'Test_Accuracy', 'Test_Balanced_Accuracy', 'Test_Balanced_Accuracy_CI95_Low', 'Test_Balanced_Accuracy_CI95_High', 'Test_Precision', 'Deployment_Model'])}
 
 Current forecasts
 -----------------
@@ -575,7 +617,10 @@ Live-data status: {live_signal_status}
 Caveats
 -------
 Longer-horizon experiments have fewer non-overlapping trades, so their Sharpe
-estimates are less stable.  Accuracy alone is not enough: balanced accuracy is
+estimates are less stable.  Sharpe is annualised with sqrt(252 / horizon), one
+trade per horizon.  Balanced-accuracy intervals use a moving-block bootstrap
+(block = forecast horizon) because overlapping labels are autocorrelated.
+Accuracy alone is not enough: balanced accuracy is
 reported to prevent an imbalanced up/down class from looking artificially good.
 Supramax will be included automatically when its Baltic Exchange Excel export
 is added to this directory and identifies the vessel/route period in the same

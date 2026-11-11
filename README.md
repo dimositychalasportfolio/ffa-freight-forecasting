@@ -39,23 +39,29 @@ class from the file name and the contract from the `Route-Period` column.
 
 ## Results (deployment model chosen on validation, evaluated on the untouched test set)
 
-| Vessel | Horizon | Model | Validation bal. acc. | **Test bal. acc.** |
-|---|---|---|---|---|
-| Capesize | +1Q | Logistic Regression | 0.72 | 0.63 |
-| Capesize | +2Q | Logistic Regression | 0.63 | 0.58 |
-| Capesize | +3Q | Gradient Boosting | 0.67 | 0.48 |
-| Capesize | **+4MON** | Logistic Regression | 0.73 | **0.69** |
-| Panamax | +1Q | Gradient Boosting | 0.79 | 0.53 |
-| Panamax | +2Q | Logistic Regression | 0.90 | 0.37 |
-| Panamax | +3Q | Gradient Boosting | 0.78 | 0.51 |
-| Panamax | **+4MON** | Logistic Regression | 0.90 | **0.66** |
+| Vessel | Horizon | Model | Validation bal. acc. | **Test bal. acc.** | Test 95% CI (block bootstrap) |
+|---|---|---|---|---|---|
+| Capesize | +1Q | Logistic Regression | 0.72 | 0.63 | 0.50 - 0.74 |
+| Capesize | +2Q | Logistic Regression | 0.63 | 0.58 | 0.50 - 0.63 |
+| Capesize | +3Q | Gradient Boosting | 0.67 | 0.48 | 0.33 - 0.61 |
+| Capesize | **+4MON** | Logistic Regression | 0.73 | **0.69** | 0.52 - 0.79 |
+| Panamax | +1Q | Gradient Boosting | 0.79 | 0.53 | 0.38 - 0.63 |
+| Panamax | +2Q | Logistic Regression | 0.90 | 0.37 | 0.24 - 0.51 |
+| Panamax | +3Q | Gradient Boosting | 0.78 | 0.51 | 0.49 - 0.52 |
+| Panamax | **+4MON** | Logistic Regression | 0.90 | **0.66** | 0.57 - 0.75 |
+
+The intervals use a moving-block bootstrap with block length equal to the forecast horizon, because
+overlapping labels are strongly autocorrelated and an ordinary bootstrap would make them far too narrow.
+
+![Model comparison](results/FFA_Model_Accuracy_Comparison.png)
 
 Full per-model results are in [`results/FFA_Model_Comparison.csv`](results/FFA_Model_Comparison.csv); backtest and data-quality summaries are in the same folder.
 
 ### What the results say
 
 1. **The only consistent out-of-sample edge is at the 4-month horizon**, for both vessel classes and
-   for every non-baseline model (balanced accuracy 61-71%).
+   for every non-baseline model (balanced accuracy 61-71%). For both deployment models the 95% interval
+   stays above 50%, but only just for Capesize (lower bound 0.52), so the edge is plausible, not proven.
 2. **At quarterly horizons the signal is unreliable.** Two of six deployment models score at or below
    50% on the test set.
 3. **Validation scores are much higher than test scores** (e.g. Panamax +2Q: 0.90 vs 0.37). Validation
@@ -64,22 +70,21 @@ Full per-model results are in [`results/FFA_Model_Comparison.csv`](results/FFA_M
 
 ## Limitations (read before citing any number)
 
-- **Backtest figures are not reliable evidence.** Each test backtest contains only 4-10 trades, and the
-  Sharpe ratio in the code is annualised with sqrt(252) although trades occur every 63-84 days, which
-  overstates it. The reported PnL and Sharpe values are therefore not reported here as results.
+- **Backtest figures are not reliable evidence.** Each test backtest contains only 4-10 trades. The Sharpe
+  ratio is annualised with sqrt(252 / horizon), i.e. one trade per horizon (an earlier version used sqrt(252),
+  which overstated it by a factor of about 8-9). With so few trades, the PnL and Sharpe values are not
+  reported here as results.
 - **Small effective sample.** Overlapping 63/84-day labels are strongly autocorrelated, so the number of
   independent observations is far lower than the row count.
 - **The price level is used as a feature**, which is non-stationary and probably drives some of the
   regime-dependence seen above.
-- **No confidence intervals** on the balanced-accuracy figures yet.
 - Supramax was not available. Live forecasts in the generated report are marked STALE (data ends 2026-04-21)
   and should be ignored.
 
 ## Next steps
 
-- Replace the single split with walk-forward evaluation and add bootstrap confidence intervals.
+- Replace the single split with walk-forward evaluation.
 - Drop the raw price level and test stationary features (spreads between tenors, curve slope).
-- Correct the Sharpe annualisation to the actual trade frequency.
 - Add Supramax and refresh the data.
 
 ## Run
