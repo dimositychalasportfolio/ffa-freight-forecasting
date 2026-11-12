@@ -59,7 +59,9 @@ class from the file name and the contract from the `Route-Period` column.
 The intervals use a moving-block bootstrap with block length equal to the forecast horizon, because
 overlapping labels are strongly autocorrelated and an ordinary bootstrap would make them far too narrow.
 
-![Model comparison](results/FFA_Model_Accuracy_Comparison.png)
+![Test balanced accuracy for every model with 95% intervals](results/figures/2_test_accuracy_with_intervals.png)
+
+![Validation versus test balanced accuracy](results/figures/4_validation_vs_test.png)
 
 Full per-model results are in [`results/FFA_Model_Comparison.csv`](results/FFA_Model_Comparison.csv); backtest and data-quality summaries are in the same folder.
 
@@ -108,6 +110,10 @@ Test blocks run from 2016 to 2025 for Capesize and from 2022 to early 2026 for P
    best 0.92). Some blocks contain only rises or only falls; balanced accuracy is undefined there, so
    they are excluded from per-block statistics but kept in the pooled number.
 
+![Walk-forward balanced accuracy per six-month block](results/figures/3_walk_forward_over_time.png)
+
+![Test-period predictions against outcomes](results/figures/5_test_predictions.png)
+
 Per-block results: [`results/FFA_Walk_Forward_Folds.csv`](results/FFA_Walk_Forward_Folds.csv);
 summary: [`results/FFA_Walk_Forward_Summary.csv`](results/FFA_Walk_Forward_Summary.csv).
 
@@ -142,8 +148,20 @@ pip install -r requirements.txt
 python main.py           # about 8 minutes, most of it the walk-forward check
 ```
 
-Outputs: `FFA_Period_Report.txt`, CSV summaries (including walk-forward) and
-`FFA_Model_Accuracy_Comparison.png`, written to the project folder.
+The console prints each step of every experiment (data range, split dates, the model chosen on
+validation, its test score with interval, the walk-forward result and the latest forecast).
+
+Outputs, written to the project folder:
+
+| File | What it is |
+|---|---|
+| `FFA_Report.html` | The full report: key findings, tables and charts in one page. Open it in a browser. |
+| `FFA_Results.xlsx` | Every table in a formatted workbook, one sheet each, including day-by-day test predictions. |
+| `figures/` | The six charts as PNG files. |
+| `FFA_*.csv`, `FFA_Period_Report.txt` | Raw tables and a plain-text report. |
+
+The HTML report and the workbook contain Baltic Exchange prices, so they are generated locally and not
+included in this repository; the charts below show accuracy and probabilities only.
 
 Tests (no data files needed):
 

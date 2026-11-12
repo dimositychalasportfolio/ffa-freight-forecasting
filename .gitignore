@@ -8,3 +8,6 @@ __pycache__/
 /FFA_*.csv
 /FFA_*.png
 /FFA_Period_Report.txt
+/FFA_Report.html
+/FFA_Results.xlsx
+/figures/

@@ -12,11 +12,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
-import matplotlib
-
-matplotlib.use("Agg")
-
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from sklearn.base import clone
@@ -65,6 +60,25 @@ class VesselSource:
     route_prefix: str
     raw_rows: int
     rejected_rows: int
+
+
+@dataclass
+class ExperimentResult:
+    """Everything one experiment produces, for the CSVs, the console and the report."""
+
+    summary: dict[str, object]
+    live: dict[str, object]
+    model_comparison: list[dict[str, object]]
+    walk_forward_folds: list[dict[str, object]]
+    walk_forward_pooled: list[dict[str, object]]
+    price: pd.Series
+    split_dates: dict[str, pd.Timestamp]
+    test_predictions: pd.DataFrame
+
+
+def log_step(experiment: str, step: int, total: int, message: str) -> None:
+    """Print one readable progress line, e.g. '[Cape +4MON] 2/6 Split: ...'."""
+    print(f"  [{experiment}] {step}/{total} {message}")
 
 
 def output_path(filename: str) -> Path:
@@ -449,18 +463,29 @@ def summarise_walk_forward(folds: pd.DataFrame, pooled: pd.DataFrame) -> pd.Data
     return summary
 
 
-def run_experiment(
-    vessel: str, label: str, source: VesselSource
-) -> tuple[
-    dict[str, object], dict[str, object], list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]
-]:
+def run_experiment(vessel: str, label: str, source: VesselSource) -> ExperimentResult:
     """Compare every classifier fairly, then prepare a validation-selected live model."""
     config = PERIOD_EXPERIMENTS[label]
     trading_days = int(config["trading_days"])
+    name_tag = f"{vessel} {config['tenor']}"
+    steps = 6
+
     price = read_contract_series(source, str(config["tenor"]))
     model_frame, live_frame = make_feature_frame(price, trading_days)
+    log_step(
+        name_tag, 1, steps,
+        f"Data: {len(price):,} daily prices, {price.index[0]:%Y-%m-%d} to {price.index[-1]:%Y-%m-%d}; "
+        f"{len(model_frame):,} usable rows; target = price higher after {trading_days} trading days "
+        f"(rises in {model_frame['Target'].mean():.0%} of rows)",
+    )
     train, validation, test = chronological_split(model_frame, trading_days)
     features = FEATURES
+    log_step(
+        name_tag, 2, steps,
+        f"Split: train {train.index[0]:%Y-%m} to {train.index[-1]:%Y-%m} ({len(train):,}) | "
+        f"validation {validation.index[0]:%Y-%m} to {validation.index[-1]:%Y-%m} ({len(validation):,}) | "
+        f"test {test.index[0]:%Y-%m} to {test.index[-1]:%Y-%m} ({len(test):,}); gap {trading_days} days",
+    )
 
     if train["Target"].nunique() < 2:
         raise ValueError("Training target has only one class.")
@@ -487,6 +512,12 @@ def run_experiment(
     deployment_train_model = fitted_models[deployment_model_name]
     validation_probability = deployment_train_model.predict_proba(validation[features])[:, 1]
     threshold, validation_sharpe = choose_threshold(validation, validation_probability, trading_days)
+    best_validation = validation_scores.iloc[0]
+    log_step(
+        name_tag, 3, steps,
+        f"Validation: chose {deployment_model_name} "
+        f"(balanced accuracy {best_validation['Validation_Balanced_Accuracy']:.2f}); trading threshold {threshold:.3f}",
+    )
 
     development = pd.concat([train, validation]).sort_index()
     final_models: dict[str, object] = {}
@@ -556,6 +587,13 @@ def run_experiment(
         signal = "NEUTRAL"
 
     deployment_test = comparison_df.loc[comparison_df["Deployment_Model"]].iloc[0]
+    log_step(
+        name_tag, 4, steps,
+        f"Test: {deployment_model_name} balanced accuracy {deployment_test['Test_Balanced_Accuracy']:.2f} "
+        f"(95% CI {deployment_test['Test_Balanced_Accuracy_CI95_Low']:.2f}-"
+        f"{deployment_test['Test_Balanced_Accuracy_CI95_High']:.2f}); "
+        f"{int((backtest['Signal'] != 0).sum())} test trades",
+    )
     summary = {
         "Vessel": vessel,
         "Period": label,
@@ -604,46 +642,53 @@ def run_experiment(
         "Deployment_Classifier": deployment_model_name,
         "Threshold": threshold,
     }
+    print(f"  [{name_tag}] 5/{steps} Walk-forward: refitting every model on each six-month block (slowest step)...")
     walk_forward_folds_rows, walk_forward_pooled_rows = walk_forward_evaluation(model_frame, trading_days, vessel, label)
-    return summary, live, model_comparison_rows, walk_forward_folds_rows, walk_forward_pooled_rows
+    pooled_logistic = next(
+        (row for row in walk_forward_pooled_rows if row["Model"] == "Logistic Regression"), None
+    )
+    if pooled_logistic is not None:
+        blocks = len({row["Fold"] for row in walk_forward_folds_rows})
+        log_step(
+            name_tag, 5, steps,
+            f"Walk-forward: {blocks} blocks; logistic regression pooled balanced accuracy "
+            f"{pooled_logistic['Pooled_Balanced_Accuracy']:.2f} "
+            f"(95% CI {pooled_logistic['Pooled_CI95_Low']:.2f}-{pooled_logistic['Pooled_CI95_High']:.2f})",
+        )
+    log_step(
+        name_tag, 6, steps,
+        f"Latest forecast (data as of {as_of_date}): probability of a rise {probability_up:.0%} -> {signal}"
+        + (" (naive baseline: always predicts the majority direction)" if deployment_model_name == "Majority Baseline" else ""),
+    )
 
-
-def plot_model_accuracy(model_comparison: pd.DataFrame) -> None:
-    """Show every model on the same out-of-sample accuracy scale."""
-    if model_comparison.empty:
-        return
-
-    comparison = model_comparison.copy()
-    comparison["Experiment"] = comparison["Vessel"] + " " + comparison["Period"]
-    experiment_order = comparison[["Experiment", "Vessel", "Period"]].drop_duplicates().sort_values(["Vessel", "Period"])[
-        "Experiment"
-    ]
-    model_order = [
-        "Majority Baseline",
-        "Logistic Regression",
-        "Random Forest",
-        "Extra Trees",
-        "Tuned Gradient Boosting",
-    ]
-    pivot = comparison.pivot(index="Experiment", columns="Model", values="Test_Balanced_Accuracy").reindex(experiment_order)
-    x = np.arange(len(pivot.index))
-    width = 0.16
-
-    plt.figure(figsize=(13, 6))
-    for position, model_name in enumerate(model_order):
-        if model_name not in pivot:
-            continue
-        values = pivot[model_name].to_numpy() * 100
-        plt.bar(x + (position - 2) * width, values, width, label=model_name)
-    plt.axhline(50, color="black", linewidth=1, linestyle="--", label="50% balanced-accuracy baseline")
-    plt.ylabel("Out-of-sample balanced accuracy (%)")
-    plt.title("FFA Model Comparison by Vessel and Period")
-    plt.ylim(0, 100)
-    plt.xticks(x, pivot.index, rotation=25, ha="right")
-    plt.legend(ncol=2, fontsize=9)
-    plt.tight_layout()
-    plt.savefig(output_path("FFA_Model_Accuracy_Comparison.png"), dpi=300, bbox_inches="tight")
-    plt.close()
+    test_predictions = pd.DataFrame(
+        {
+            "Price": test["Price"],
+            "Future_Price": test["Future_Price"],
+            "Actual_Up": test["Target"].astype(int),
+            "Probability_Up": test_probability,
+            "Predicted_Up": test_prediction.astype(int),
+        },
+        index=test.index,
+    )
+    split_dates = {
+        "train_start": train.index[0],
+        "train_end": train.index[-1],
+        "validation_start": validation.index[0],
+        "validation_end": validation.index[-1],
+        "test_start": test.index[0],
+        "test_end": test.index[-1],
+    }
+    return ExperimentResult(
+        summary=summary,
+        live=live,
+        model_comparison=model_comparison_rows,
+        walk_forward_folds=walk_forward_folds_rows,
+        walk_forward_pooled=walk_forward_pooled_rows,
+        price=price,
+        split_dates=split_dates,
+        test_predictions=test_predictions,
+    )
 
 
 def format_table(frame: pd.DataFrame, columns: Iterable[str]) -> str:
@@ -675,19 +720,22 @@ def main() -> None:
     walk_forward_rows: list[dict[str, object]] = []
     walk_forward_pooled: list[dict[str, object]] = []
     failures: list[dict[str, str]] = []
-    for vessel, source in sources.items():
-        for label in PERIOD_EXPERIMENTS:
-            try:
-                print(f"Running {vessel} {label}...")
-                summary, live, comparison, walk_forward, pooled = run_experiment(vessel, label, source)
-                summaries.append(summary)
-                live_forecasts.append(live)
-                model_comparisons.extend(comparison)
-                walk_forward_rows.extend(walk_forward)
-                walk_forward_pooled.extend(pooled)
-            except Exception as exc:
-                failures.append({"Vessel": vessel, "Period": label, "Status": str(exc)})
-                print(f"Skipped {vessel} {label}: {exc}")
+    results: list[ExperimentResult] = []
+    experiments = [(vessel, label) for vessel in sources for label in PERIOD_EXPERIMENTS]
+    for number, (vessel, label) in enumerate(experiments, start=1):
+        print(f"\nExperiment {number}/{len(experiments)}: {vessel} {PERIOD_EXPERIMENTS[label]['tenor']}")
+        try:
+            result = run_experiment(vessel, label, sources[vessel])
+        except Exception as exc:
+            failures.append({"Vessel": vessel, "Period": label, "Status": str(exc)})
+            print(f"  Skipped {vessel} {label}: {exc}")
+            continue
+        results.append(result)
+        summaries.append(result.summary)
+        live_forecasts.append(result.live)
+        model_comparisons.extend(result.model_comparison)
+        walk_forward_rows.extend(result.walk_forward_folds)
+        walk_forward_pooled.extend(result.walk_forward_pooled)
 
     summary_df = pd.DataFrame(summaries)
     live_df = pd.DataFrame(live_forecasts)
@@ -701,7 +749,6 @@ def main() -> None:
     walk_forward_summary_df = summarise_walk_forward(walk_forward_df, pd.DataFrame(walk_forward_pooled))
     walk_forward_df.to_csv(output_path("FFA_Walk_Forward_Folds.csv"), index=False)
     walk_forward_summary_df.to_csv(output_path("FFA_Walk_Forward_Summary.csv"), index=False)
-    plot_model_accuracy(model_comparison_df)
 
     max_data_age = int(live_df["Data_Age_Days"].max()) if not live_df.empty else 0
     live_signal_status = (
@@ -771,7 +818,24 @@ is added to this directory and identifies the vessel/route period in the same
 way as the existing files.
 """
     output_path("FFA_Period_Report.txt").write_text(report, encoding="utf-8")
-    print("Complete — summaries, live forecasts, quality checks, and chart saved.")
+
+    from report import build_reports
+
+    print("\nBuilding charts, HTML report and Excel workbook...")
+    written = build_reports(
+        results=results,
+        summary=summary_df,
+        model_comparison=model_comparison_df,
+        walk_forward_folds=walk_forward_df,
+        walk_forward_summary=walk_forward_summary_df,
+        live=live_df,
+        quality=quality,
+        output_dir=BASE_DIR,
+    )
+    print("\nDone. Open FFA_Report.html in a browser for the full results. Files written:")
+    for path in ["FFA_Period_Report.txt", "FFA_Period_Backtest_Summary.csv", "FFA_Model_Comparison.csv",
+                 "FFA_Walk_Forward_Summary.csv", "FFA_Live_Forecasts.csv", *written]:
+        print(f"  - {path}")
 
 
 if __name__ == "__main__":
