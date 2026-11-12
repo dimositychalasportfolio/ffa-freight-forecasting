@@ -1,38 +1,30 @@
-"""Runnable entry point for the FFA vessel-and-period forecasting experiment."""
+"""Run the FFA forecasting experiment: python main.py
+
+Install the dependencies first with: pip install -r requirements.txt
+"""
 
 import importlib.util
-import os
-import subprocess
 import sys
 
 
-REQUIRED_PACKAGES = {
+REQUIRED_MODULES = {
     "numpy": "numpy",
     "pandas": "pandas",
     "matplotlib": "matplotlib",
-    "scikit-learn": "sklearn",
+    "sklearn": "scikit-learn",
     "openpyxl": "openpyxl",
 }
 
 
-def ensure_dependencies() -> None:
-    """Install missing packages before importing the modelling module."""
-    missing = [
-        package
-        for package, module in REQUIRED_PACKAGES.items()
-        if importlib.util.find_spec(module) is None
-    ]
+def check_dependencies() -> None:
+    """Stop with a clear message if a package is missing, instead of installing it silently."""
+    missing = [package for module, package in REQUIRED_MODULES.items() if importlib.util.find_spec(module) is None]
     if missing:
-        print(f"Installing missing packages: {', '.join(missing)}")
-        environment = {**os.environ, "PYTHONUTF8": "1", "PIP_DISABLE_PIP_VERSION_CHECK": "1"}
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "--no-color", "--progress-bar", "off", *missing],
-            env=environment,
-        )
+        sys.exit(f"Missing packages: {', '.join(missing)}. Run: pip install -r requirements.txt")
 
 
 def main() -> None:
-    ensure_dependencies()
+    check_dependencies()
     from ffa_panel import main as run_panel
 
     run_panel()

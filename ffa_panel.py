@@ -52,6 +52,11 @@ RANDOM_STATE = 42
 FEATURES = ["Return_1D", "Return_5D", "Return_20D", "MA_Gap", "Volatility_20D", "RSI_14"]
 MAX_LIVE_DATA_STALENESS_DAYS = 7
 
+# Walk-forward evaluation: train on everything before a test block (minus a
+# purge gap equal to the horizon), test on the next block, then move forward.
+WALK_FORWARD_MIN_TRAIN_DAYS = 504   # about two years of trading days
+WALK_FORWARD_TEST_DAYS = 126        # about six months per test block
+
 
 @dataclass
 class VesselSource:
@@ -332,9 +337,123 @@ def choose_threshold(validation: pd.DataFrame, probabilities: np.ndarray, tradin
     return max(valid, key=lambda item: item[1]) if valid else (0.55, float("nan"))
 
 
+def walk_forward_folds(
+    n_rows: int,
+    trading_days: int,
+    min_train: int = WALK_FORWARD_MIN_TRAIN_DAYS,
+    test_size: int = WALK_FORWARD_TEST_DAYS,
+) -> list[tuple[range, range]]:
+    """Expanding-window folds as (train rows, test rows) position ranges.
+
+    Each test block starts after at least ``min_train`` rows. The training
+    rows stop ``trading_days`` before the test block, because a training label
+    looks that far ahead and would otherwise use prices from the test block.
+    """
+    folds = []
+    test_start = min_train + trading_days
+    while test_start + test_size <= n_rows:
+        train_end = test_start - trading_days
+        folds.append((range(0, train_end), range(test_start, test_start + test_size)))
+        test_start += test_size
+    return folds
+
+
+def walk_forward_evaluation(
+    frame: pd.DataFrame, trading_days: int, vessel: str, label: str
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Score every model family on each walk-forward test block.
+
+    Models are refitted from scratch for each block, using only data available
+    before it; gradient-boosting parameters are re-tuned inside each training
+    window. Returns per-block rows and one pooled row per model.
+
+    The headline number is the pooled balanced accuracy over every
+    out-of-sample prediction. Per-block balanced accuracy is undefined when a
+    block contains only rises or only falls, which happens often with
+    84-day labels in a 126-day block, so those blocks get NaN.
+    """
+    fold_rows: list[dict[str, object]] = []
+    pooled_truth: dict[str, list[np.ndarray]] = {}
+    pooled_prediction: dict[str, list[np.ndarray]] = {}
+    for fold_number, (train_rows, test_rows) in enumerate(walk_forward_folds(len(frame), trading_days), start=1):
+        train = frame.iloc[train_rows.start:train_rows.stop]
+        test = frame.iloc[test_rows.start:test_rows.stop]
+        if train["Target"].nunique() < 2:
+            continue
+        both_classes = test["Target"].nunique() == 2
+        for name, candidate in classifier_candidates().items():
+            model = clone(candidate).fit(train[FEATURES], train["Target"])
+            prediction = model.predict(test[FEATURES])
+            pooled_truth.setdefault(name, []).append(test["Target"].to_numpy())
+            pooled_prediction.setdefault(name, []).append(prediction)
+            fold_rows.append(
+                {
+                    "Vessel": vessel,
+                    "Period": label,
+                    "Fold": fold_number,
+                    "Train_End": train.index[-1].date().isoformat(),
+                    "Test_Start": test.index[0].date().isoformat(),
+                    "Test_End": test.index[-1].date().isoformat(),
+                    "Test_Up_Share": float(test["Target"].mean()),
+                    "Both_Classes_In_Test": both_classes,
+                    "Model": name,
+                    "Balanced_Accuracy": (
+                        balanced_accuracy_score(test["Target"], prediction) if both_classes else float("nan")
+                    ),
+                    "Accuracy": accuracy_score(test["Target"], prediction),
+                }
+            )
+
+    pooled_rows: list[dict[str, object]] = []
+    for name in pooled_truth:
+        truth = np.concatenate(pooled_truth[name])
+        prediction = np.concatenate(pooled_prediction[name])
+        ci_low, ci_high = block_bootstrap_ci(pd.Series(truth), prediction, trading_days)
+        pooled_rows.append(
+            {
+                "Vessel": vessel,
+                "Period": label,
+                "Model": name,
+                "Pooled_Predictions": len(truth),
+                "Pooled_Balanced_Accuracy": balanced_accuracy_score(truth, prediction),
+                "Pooled_CI95_Low": ci_low,
+                "Pooled_CI95_High": ci_high,
+            }
+        )
+    return fold_rows, pooled_rows
+
+
+def summarise_walk_forward(folds: pd.DataFrame, pooled: pd.DataFrame) -> pd.DataFrame:
+    """One row per vessel, period and model: pooled score plus per-block spread."""
+    if folds.empty:
+        return pooled
+    keys = ["Vessel", "Period", "Model"]
+    scored = folds.dropna(subset=["Balanced_Accuracy"])
+    spread = (
+        scored.assign(Above_50=scored["Balanced_Accuracy"] > 0.5)
+        .groupby(keys, sort=False)
+        .agg(
+            Folds=("Fold", "count"),
+            Median_Fold_Balanced_Accuracy=("Balanced_Accuracy", "median"),
+            Worst_Fold=("Balanced_Accuracy", "min"),
+            Best_Fold=("Balanced_Accuracy", "max"),
+            Share_Of_Folds_Above_50=("Above_50", "mean"),
+        )
+        .reset_index()
+    )
+    skipped = (
+        folds.loc[~folds["Both_Classes_In_Test"]].groupby(keys, sort=False)["Fold"].count().rename("One_Class_Folds_Skipped")
+    )
+    summary = pooled.merge(spread, on=keys, how="left").merge(skipped, on=keys, how="left")
+    summary["One_Class_Folds_Skipped"] = summary["One_Class_Folds_Skipped"].fillna(0).astype(int)
+    return summary
+
+
 def run_experiment(
     vessel: str, label: str, source: VesselSource
-) -> tuple[dict[str, object], dict[str, object], list[dict[str, object]]]:
+) -> tuple[
+    dict[str, object], dict[str, object], list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]
+]:
     """Compare every classifier fairly, then prepare a validation-selected live model."""
     config = PERIOD_EXPERIMENTS[label]
     trading_days = int(config["trading_days"])
@@ -485,7 +604,8 @@ def run_experiment(
         "Deployment_Classifier": deployment_model_name,
         "Threshold": threshold,
     }
-    return summary, live, model_comparison_rows
+    walk_forward_folds_rows, walk_forward_pooled_rows = walk_forward_evaluation(model_frame, trading_days, vessel, label)
+    return summary, live, model_comparison_rows, walk_forward_folds_rows, walk_forward_pooled_rows
 
 
 def plot_model_accuracy(model_comparison: pd.DataFrame) -> None:
@@ -552,15 +672,19 @@ def main() -> None:
     summaries: list[dict[str, object]] = []
     live_forecasts: list[dict[str, object]] = []
     model_comparisons: list[dict[str, object]] = []
+    walk_forward_rows: list[dict[str, object]] = []
+    walk_forward_pooled: list[dict[str, object]] = []
     failures: list[dict[str, str]] = []
     for vessel, source in sources.items():
         for label in PERIOD_EXPERIMENTS:
             try:
                 print(f"Running {vessel} {label}...")
-                summary, live, comparison = run_experiment(vessel, label, source)
+                summary, live, comparison, walk_forward, pooled = run_experiment(vessel, label, source)
                 summaries.append(summary)
                 live_forecasts.append(live)
                 model_comparisons.extend(comparison)
+                walk_forward_rows.extend(walk_forward)
+                walk_forward_pooled.extend(pooled)
             except Exception as exc:
                 failures.append({"Vessel": vessel, "Period": label, "Status": str(exc)})
                 print(f"Skipped {vessel} {label}: {exc}")
@@ -573,6 +697,10 @@ def main() -> None:
     live_df.to_csv(output_path("FFA_Live_Forecasts.csv"), index=False)
     model_comparison_df.to_csv(output_path("FFA_Model_Comparison.csv"), index=False)
     failures_df.to_csv(output_path("FFA_Experiment_Failures.csv"), index=False)
+    walk_forward_df = pd.DataFrame(walk_forward_rows)
+    walk_forward_summary_df = summarise_walk_forward(walk_forward_df, pd.DataFrame(walk_forward_pooled))
+    walk_forward_df.to_csv(output_path("FFA_Walk_Forward_Folds.csv"), index=False)
+    walk_forward_summary_df.to_csv(output_path("FFA_Walk_Forward_Summary.csv"), index=False)
     plot_model_accuracy(model_comparison_df)
 
     max_data_age = int(live_df["Data_Age_Days"].max()) if not live_df.empty else 0
@@ -613,6 +741,16 @@ Deployment-model summary
 Complete model comparison
 -------------------------
 {format_table(model_comparison_df, ['Vessel', 'Period', 'Model', 'Validation_Accuracy', 'Validation_Balanced_Accuracy', 'Test_Accuracy', 'Test_Balanced_Accuracy', 'Test_Balanced_Accuracy_CI95_Low', 'Test_Balanced_Accuracy_CI95_High', 'Test_Precision', 'Deployment_Model'])}
+
+Walk-forward evaluation
+-----------------------
+Expanding training window (at least {WALK_FORWARD_MIN_TRAIN_DAYS} trading days), test blocks of
+{WALK_FORWARD_TEST_DAYS} trading days, purge gap equal to the horizon, every model refitted per block.
+
+Pooled balanced accuracy uses every out-of-sample prediction; blocks that contain only
+rises or only falls are left out of the per-block columns, where the metric is undefined.
+
+{format_table(walk_forward_summary_df, ['Vessel', 'Period', 'Model', 'Pooled_Balanced_Accuracy', 'Pooled_CI95_Low', 'Pooled_CI95_High', 'Folds', 'One_Class_Folds_Skipped', 'Median_Fold_Balanced_Accuracy', 'Share_Of_Folds_Above_50'])}
 
 Current forecasts
 -----------------
