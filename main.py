@@ -18,8 +18,9 @@ REQUIRED_MODULES = {
 
 def check_dependencies() -> None:
     """Stop with a clear message if a package is missing, instead of installing it silently."""
-    missing = [package for module, package in REQUIRED_MODULES.items() if importlib.util.find_spec(module) is None]
-    if missing:
+    if missing := [
+        package for module, package in REQUIRED_MODULES.items() if importlib.util.find_spec(module) is None
+    ]:
         sys.exit(f"Missing packages: {', '.join(missing)}. Run: pip install -r requirements.txt")
 
 
