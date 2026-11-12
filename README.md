@@ -103,7 +103,7 @@ Test blocks run from 2016 to 2025 for Capesize and from 2022 to early 2026 for P
 2. **The naive baseline is not always 0.50 here.** It predicts the majority direction of each training
    window, so in trending markets it is right more often than chance: 0.58 for Capesize +4MON. Part of
    the 4-month "edge" is therefore trend persistence that a much simpler rule already captures; the
-   best model adds about 0.06 on top of it, the others 0.00-0.01.
+   best model adds about 0.06 on top of it, the other three between -0.01 and +0.01.
 3. **Results vary a lot from block to block** (Capesize +4MON logistic regression: worst block 0.33,
    best 0.92). Some blocks contain only rises or only falls; balanced accuracy is undefined there, so
    they are excluded from per-block statistics but kept in the pooled number.
